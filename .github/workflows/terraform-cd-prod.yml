@@ -1,0 +1,72 @@
+# This GitHub workflow deploys Terraform resources (ML resource config and more)
+# defined under mlc_mlops_stacks_aws/terraform/prod, when PRs are merged into the release branch
+name: Terraform Deployment for mlc_mlops_stacks_aws Prod
+
+on:
+  push:
+    branches:
+      - 'release'
+    paths:
+      - 'mlc_mlops_stacks_aws/terraform/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: ./mlc_mlops_stacks_aws/terraform
+
+jobs:
+  prod:
+    concurrency: mlc_mlops_stacks_aws-prod-terraform-job
+    runs-on: ubuntu-20.04
+    env:
+      DATABRICKS_HOST: https://e2-demo-field-eng.cloud.databricks.com
+      DATABRICKS_TOKEN: ${{secrets.PROD_WORKSPACE_TOKEN}}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v1
+      - name: Terraform fmt
+        id: fmt
+        run: terraform -chdir=prod fmt -check
+        continue-on-error: true
+      - name: Configure Terraform state backend authentication
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{secrets.AWS_ACCESS_KEY_ID}}" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=${{secrets.AWS_SECRET_ACCESS_KEY}}" >> "$GITHUB_ENV"
+      - name: Terraform Init
+        id: init
+        run: terraform -chdir=prod init
+      - name: Terraform Validate
+        id: validate
+        run: terraform -chdir=prod validate
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform -chdir=prod plan -no-color \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}"
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform -chdir=prod apply -auto-approve \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}"
+      - name: Terraform Output
+        id: output
+        run: terraform -chdir=prod output -json
+      - name: Commit Terraform Output to File
+        id: commit
+        run: |
+          git pull
+          mkdir -p output
+          echo '${{ steps.output.outputs.stdout }}' | jq '.' > output/prod.json
+          git config --global user.name 'Terraform Output Github Workflow'
+          git config --global user.email '<>'
+          output=$(git status --porcelain)
+          if [ -n "$output" ]
+          then
+            git add -A
+            git commit -m "Commit prod output"
+            git push
+            git fetch origin release
+            git checkout release
+            git cherry-pick master
+            git push
+          fi
